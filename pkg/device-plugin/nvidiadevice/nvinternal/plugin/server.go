@@ -394,6 +394,11 @@ func (plugin *NvidiaDevicePlugin) Register() error {
 	client := kubeletdevicepluginv1beta1.NewRegistrationClient(conn)
 	reqt := &kubeletdevicepluginv1beta1.RegisterRequest{
 		Version:      kubeletdevicepluginv1beta1.Version,
+		/** 
+		 * * my
+		 * device plugin 的访问地址，kubelet 会通过这个 sock 和 device plugin 进行交互
+		 * 默认值 ResourceName 为 nvidia.com/vgpu，Endpoint 为 /var/lib/kubelet/device-plugins/nvidia-vgpu.sock
+		 */
 		Endpoint:     path.Base(plugin.socket),
 		ResourceName: string(plugin.rm.Resource()),
 		Options: &kubeletdevicepluginv1beta1.DevicePluginOptions{
@@ -416,6 +421,14 @@ func (plugin *NvidiaDevicePlugin) GetDevicePluginOptions(context.Context, *kubel
 	return options, nil
 }
 
+/**
+ * * my
+ * 正常情况下通过 device plugin 接口 ListAndWatch 感知节点上的设备并上报给 kubelet
+ * HAMI 在 WatchAndRegister 有特殊逻辑
+ * 
+ * plugin.apiDevices() 调用 GetPluginDevices() 根据 DeviceSplitCount 对 GPU 进行复制
+ * TODO: 复制的源头，也就是设备信息来自 buildGPUDeviceMap() 需要研究一下何时调用何时创建的 DeviceMap
+ */
 // ListAndWatch lists devices and update that list according to the health status
 func (plugin *NvidiaDevicePlugin) ListAndWatch(e *kubeletdevicepluginv1beta1.Empty, s kubeletdevicepluginv1beta1.DevicePlugin_ListAndWatchServer) error {
 	s.Send(&kubeletdevicepluginv1beta1.ListAndWatchResponse{Devices: plugin.apiDevices()})
@@ -451,6 +464,14 @@ func (plugin *NvidiaDevicePlugin) GetPreferredAllocation(ctx context.Context, r 
 	return response, nil
 }
 
+/**
+ * * my
+ * HAMi 的自定义逻辑：根据 Pod Resource 中的申请资源数量设置对应的环境变量，以及挂载 libvgpu.so 以替换 Pod 中的原生驱动
+ * NVIDIA 的原生逻辑：设置 NVIDIA_VISIBLE_DEVICES 这个环境变量，然后由 NVIDIA Container Toolkit 对该容器分配 GPU
+ * 因为 HAMi 并没有为容器分配 GPU 的能力，所以需要 NVIDIA 的原生逻辑
+ * 这样 Pod 中有环境变量，NVIDIA Container Toolkit 就会为其分配 GPU，然后 HAMi 自定义逻辑中替换 libvgpu.so 和添加部分环境变量，以此来实现对 GPU 的限制
+ */
+
 // Allocate which return list of devices.
 func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdevicepluginv1beta1.AllocateRequest) (*kubeletdevicepluginv1beta1.AllocateResponse, error) {
 	klog.InfoS("Allocate", "request", reqs)
@@ -481,7 +502,7 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 					return nil, fmt.Errorf("invalid allocation request for '%s': unknown device: %s", plugin.rm.Resource(), id)
 				}
 			}
-
+			// NVIDIA 的原生逻辑
 			response, err := plugin.getAllocateResponse(req.DevicesIDs)
 			if err != nil {
 				PodAllocationFailed(nodename, current, NodeLockNvidia)
@@ -499,6 +520,7 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 				PodAllocationFailed(nodename, current, NodeLockNvidia)
 				return &kubeletdevicepluginv1beta1.AllocateResponse{}, errors.New("device number not matched")
 			}
+			// NVIDIA 的原生逻辑
 			response, err := plugin.getAllocateResponse(plugin.GetContainerDeviceStrArray(devreq))
 			if err != nil {
 				return nil, fmt.Errorf("failed to get allocate response: %v", err)
@@ -510,22 +532,32 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 				return &kubeletdevicepluginv1beta1.AllocateResponse{}, err
 			}
 
+			// 为容器中增加部分 HAMi 自定义的环境变量 CUDA_DEVICE_MEMORY_LIMIT_X 和 CUDA_DEVICE_SM_LIMIT ，配合 ibvgpu.so 实现 GPU core、memory 的限制
 			if plugin.operatingMode != "mig" {
+				// TODO: 对显存的限制是遍历各dev的Usedmem，但是对算力的限制则是只取第一个设备的Usedcores
+				// 添加一个 CUDA_DEVICE_MEMORY_LIMIT_$Index 的环境变量，用于 gpu memory 限制
 				for i, dev := range devreq {
 					limitKey := fmt.Sprintf("CUDA_DEVICE_MEMORY_LIMIT_%v", i)
 					response.Envs[limitKey] = fmt.Sprintf("%vm", dev.Usedmem)
 				}
+				// 根据申请的 gpucores 配置 gpu core 限制的环境变量
 				response.Envs["CUDA_DEVICE_SM_LIMIT"] = fmt.Sprint(devreq[0].Usedcores)
+				// 设置 share_region mmap 文件在容器中的位置
 				response.Envs["CUDA_DEVICE_MEMORY_SHARED_CACHE"] = fmt.Sprintf("%s/vgpu/%v.cache", hostHookPath, uuid.New().String())
+				// Gpu memory 超额订阅
 				if *plugin.schedulerConfig.DeviceMemoryScaling > 1 {
 					response.Envs["CUDA_OVERSUBSCRIBE"] = "true"
 				}
 				if *plugin.schedulerConfig.LogLevel != "" {
 					response.Envs["LIBCUDA_LOG_LEVEL"] = string(*plugin.schedulerConfig.LogLevel)
 				}
+				// 是否关闭算力限制
 				if plugin.schedulerConfig.DisableCoreLimit {
 					response.Envs[util.CoreLimitSwitch] = "disable"
 				}
+				// 挂载 vgpu 相关文件，替换 libvgpu.so 库
+
+				// 随机文件存放位置 /usr/local/vgpu/containers/xxx/xxx
 				cacheFileHostDirectory := fmt.Sprintf("%s/vgpu/containers/%s_%s", hostHookPath, current.UID, currentCtr.Name)
 				os.RemoveAll(cacheFileHostDirectory)
 
@@ -534,13 +566,18 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 				os.MkdirAll("/tmp/vgpulock", 0777)
 				os.Chmod("/tmp/vgpulock", 0777)
 				response.Mounts = append(response.Mounts,
-					&kubeletdevicepluginv1beta1.Mount{ContainerPath: fmt.Sprintf("%s/vgpu/libvgpu.so", hostHookPath),
+					// 挂载预设的 libvgpu.so 替换 nvidia 默认的驱动
+					&kubeletdevicepluginv1beta1.Mount{
+						ContainerPath: fmt.Sprintf("%s/vgpu/libvgpu.so", hostHookPath),
 						HostPath: GetLibPath(),
 						ReadOnly: true},
-					&kubeletdevicepluginv1beta1.Mount{ContainerPath: fmt.Sprintf("%s/vgpu", hostHookPath),
+					// 随机文件挂载进 pod 作为 vgpu 使用
+					&kubeletdevicepluginv1beta1.Mount{
+						ContainerPath: fmt.Sprintf("%s/vgpu", hostHookPath),
 						HostPath: cacheFileHostDirectory,
 						ReadOnly: false},
-					&kubeletdevicepluginv1beta1.Mount{ContainerPath: "/tmp/vgpulock",
+					&kubeletdevicepluginv1beta1.Mount{
+						ContainerPath: "/tmp/vgpulock",
 						HostPath: "/tmp/vgpulock",
 						ReadOnly: false},
 				)
@@ -557,8 +594,10 @@ func (plugin *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *kubeletdev
 						break
 					}
 				}
+				// 挂载预设的 /etc/ld.so.preload 文件来使用预设的 libvgpu.so 
 				if !found {
-					response.Mounts = append(response.Mounts, &kubeletdevicepluginv1beta1.Mount{ContainerPath: "/etc/ld.so.preload",
+					response.Mounts = append(response.Mounts, &kubeletdevicepluginv1beta1.Mount{
+						ContainerPath: "/etc/ld.so.preload",
 						HostPath: hostHookPath + "/vgpu/ld.so.preload",
 						ReadOnly: true},
 					)
@@ -592,8 +631,8 @@ func (plugin *NvidiaDevicePlugin) getAllocateResponse(requestIds []string) (*kub
 	response, err := plugin.getAllocateResponseForCDI(responseID, deviceIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get allocate response for CDI: %v", err)
-	}
-
+	} 
+	// 添加环境变量 NVIDIA_VISIBLE_DEVICES
 	response.Envs = plugin.apiEnvs(plugin.deviceListEnvvar, deviceIDs)
 	//if plugin.deviceListStrategies.Includes(spec.DeviceListStrategyVolumeMounts) || plugin.deviceListStrategies.Includes(spec.DeviceListStrategyEnvvar) {
 	//	response.Envs = plugin.apiEnvs(plugin.deviceListEnvvar, deviceIDs)

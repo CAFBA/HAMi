@@ -55,6 +55,7 @@ func fitInDevices(node *NodeUsage, requests device.ContainerDeviceRequests, pod 
 	free, freeCore, freeMem := int32(0), int32(0), int32(0)
 	sums := 0
 	// computer all device score for one node
+	// 为 GPU 计算得分，注意计算节点得分的方法和计算 GPU 得分的方法不同
 	for index := range node.Devices.DeviceLists {
 		node.Devices.DeviceLists[index].ComputeScore(requests)
 	}
@@ -70,6 +71,7 @@ func fitInDevices(node *NodeUsage, requests device.ContainerDeviceRequests, pod 
 		if !ok {
 			return false, "Device type not found"
 		}
+		// 过滤 GPU 然后选择 GPU
 		fit, tmpDevs, reason := device.GetDevices()[k.Type].Fit(getNodeResources(*node, k.Type), k, pod, nodeInfo, devinput)
 		if fit {
 			for idx, val := range tmpDevs[k.Type] {
@@ -96,12 +98,14 @@ func fitInDevices(node *NodeUsage, requests device.ContainerDeviceRequests, pod 
 		} else {
 			return false, reason
 		}
+		// 对于满足条件的 GPU，使用 devinput 对象进行记录，这里的 devinput 实际上就是前面传进来的 Score 对象
 		(*devinput)[k.Type] = append((*devinput)[k.Type], devs)
 	}
 	return true, ""
 }
 
 func (s *Scheduler) calcScore(nodes *map[string]*NodeUsage, resourceReqs device.PodDeviceRequests, task *corev1.Pod, failedNodes map[string]string) (*policy.NodeScoreList, error) {
+	// 解析调度策略
 	userNodePolicy := config.NodeSchedulerPolicy
 	if task.GetAnnotations() != nil {
 		if value, ok := task.GetAnnotations()[policy.NodeSchedulerPolicyAnnotationKey]; ok {
@@ -125,6 +129,7 @@ func (s *Scheduler) calcScore(nodes *map[string]*NodeUsage, resourceReqs device.
 
 			viewStatus(*node)
 			score := policy.NodeScore{NodeID: nodeID, Node: node.Node, Devices: make(device.PodDevices), Score: 0}
+			// 为节点计算得分
 			score.ComputeDefaultScore(node.Devices)
 			snapshot := score.SnapshotDevice(node.Devices)
 
@@ -138,6 +143,7 @@ func (s *Scheduler) calcScore(nodes *map[string]*NodeUsage, resourceReqs device.
 			//This loop is for different container request
 			ctrfit := false
 			deviceType := ""
+			// 计算节点得分之后，遍历 GPU 请求信息
 			for ctrid, n := range resourceReqs {
 				sums := 0
 				for _, k := range n {
@@ -150,6 +156,7 @@ func (s *Scheduler) calcScore(nodes *map[string]*NodeUsage, resourceReqs device.
 					continue
 				}
 				klog.V(5).InfoS("fitInDevices", "pod", klog.KObj(task), "node", nodeID)
+				// 为 GPU 计算得分并过滤 GPU 
 				fit, reason := fitInDevices(node, n, task, nodeInfo, &score.Devices)
 				// found certain deviceType, fill missing empty allocation for containers before this
 				for idx := range score.Devices {
@@ -162,6 +169,7 @@ func (s *Scheduler) calcScore(nodes *map[string]*NodeUsage, resourceReqs device.
 					}
 				}
 				ctrfit = fit
+				// 过滤节点
 				if !fit {
 					klog.V(4).InfoS(common.NodeUnfitPod, "pod", klog.KObj(task), "node", nodeID, "reason", reason)
 					failedNodesMutex.Lock()

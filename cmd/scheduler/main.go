@@ -110,7 +110,6 @@ func start() error {
 		client.WithQPS(config.QPS),
 		client.WithTimeout(config.Timeout),
 	)
-
 	config.InitDevices()
 	sher = scheduler.NewScheduler()
 	sher.Start()

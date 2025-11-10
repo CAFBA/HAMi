@@ -86,6 +86,10 @@ func GetNumaNode(d nvml.Device) (bool, int, error) {
 	return true, node, nil
 }
 
+/**
+ * * my
+ * 获取 Node 上的 GPU 信息，并组装成 api.DeviceInfo 对象
+ */
 func (plugin *NvidiaDevicePlugin) getAPIDevices() *[]*device.DeviceInfo {
 	devs := plugin.Devices()
 	defer nvml.Shutdown()
@@ -95,6 +99,7 @@ func (plugin *NvidiaDevicePlugin) getAPIDevices() *[]*device.DeviceInfo {
 		panic(0)
 	}
 	res := make([]*device.DeviceInfo, 0, len(devs))
+	// 通过 nvml 库获取 GPU 信息
 	for UUID := range devs {
 		ndev, ret := nvml.DeviceGetHandleByUUID(UUID)
 		if ret != nvml.SUCCESS {
@@ -120,6 +125,7 @@ func (plugin *NvidiaDevicePlugin) getAPIDevices() *[]*device.DeviceInfo {
 			panic(0)
 		}
 
+		// 处理 Scaling
 		registeredmem := int32(memoryTotal / 1024 / 1024)
 		if *plugin.schedulerConfig.DeviceMemoryScaling != 1 {
 			registeredmem = int32(float64(registeredmem) * *plugin.schedulerConfig.DeviceMemoryScaling)
@@ -157,7 +163,10 @@ func (plugin *NvidiaDevicePlugin) getAPIDevices() *[]*device.DeviceInfo {
 	}
 	return &res
 }
-
+/**
+ * * my
+ * 调用 kube-apiserver 更新 Node 对象的 Annoations
+ */
 func (plugin *NvidiaDevicePlugin) RegisterInAnnotation() error {
 	devices := plugin.getAPIDevices()
 	klog.InfoS("start working on the devices", "devices", devices)
@@ -196,6 +205,17 @@ func (plugin *NvidiaDevicePlugin) RegisterInAnnotation() error {
 	return err
 }
 
+
+/** 
+ * * my
+ * 将 node 上的 GPU 信息以 annotations 的形式添加到 Node 对象上
+ * HAMi 将 GPU 详细信息（如算力、内存、型号）存储为节点注解，供调度器解析
+ * 直接和 kube-apiserver 进行通信，而不是使用的传统的 device plugin 上报流程，因此不会在 Node Capacity 中显示
+ * 
+ * volcano-vgpu-device-plugin 通过 Kubernetes API 直接补丁方式
+ * 将 volcano.sh/vgpu-number 和 volcano.sh/vgpu-memory 写入 Node 的 capacity 和 allocatable 字段中，而不是通过标准的 Device Plugin 接口进行注册
+ * 通过这种方式注册的资源虽然可以在 Node Capacity 中显示，但并不受 kubelet 的标准机制管理，kubelet 无法自动更新或释放这些资源
+ */
 func (plugin *NvidiaDevicePlugin) WatchAndRegister(disableNVML <-chan bool, ackDisableWatchAndRegister chan<- bool) {
 	klog.Info("Starting WatchAndRegister")
 	errorSleepInterval := time.Second * 5

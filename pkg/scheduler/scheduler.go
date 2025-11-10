@@ -44,6 +44,11 @@ import (
 	nodelockutil "github.com/Project-HAMi/HAMi/pkg/util/nodelock"
 )
 
+/**
+ * * my
+ * 下述数据来源是 node 的 Annoations，而 Annoations 由 device plugin 添加
+ * 再通过 getNodesUsage 从 node 的 Annoations 中解析出数据进行保存
+ */
 type Scheduler struct {
 	*nodeManager
 	podManager *device.PodManager
@@ -91,6 +96,9 @@ func (s *Scheduler) doNodeNotify() {
 	}
 }
 
+/**
+ * 只会处理 hami.io/vgpu-node annoations 的 Pod，过滤掉其他 Pod，从 Pod Annoations 中解析出该 Pod 使用的 GPU UUID 以及 memory 和 core 等信息
+ */
 func (s *Scheduler) onAddPod(obj any) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
@@ -183,6 +191,10 @@ func (s *Scheduler) onDelQuota(obj interface{}) {
 	s.quotaManager.DelQuota(quota)
 }
 
+/**
+ * * my
+ * 利用 Informer 获取 Node 上运行的 Pod，根据 Pod 申请的资源和 Node 上的总资源计算出剩余资源
+ */
 func (s *Scheduler) Start() {
 	klog.InfoS("Starting HAMi scheduler components")
 	s.kubeClient = client.GetClient()
@@ -217,7 +229,8 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) RegisterFromNodeAnnotations() {
 	klog.InfoS("Entering RegisterFromNodeAnnotations")
 	defer klog.InfoS("Exiting RegisterFromNodeAnnotations")
-
+	
+	//  kube-apiserver 查询节点列表
 	labelSelector := labels.Set(config.NodeLabelSelector).AsSelector()
 	klog.InfoS("Using label selector for list nodes", "selector", labelSelector.String())
 
@@ -241,6 +254,7 @@ func (s *Scheduler) RegisterFromNodeAnnotations() {
 		}
 		klog.V(5).InfoS("Listed nodes", "nodeCount", len(rawNodes))
 		var nodeNames []string
+		// 从 node 信息中解析出 GPU 信息
 		for _, val := range rawNodes {
 			nodeNames = append(nodeNames, val.Name)
 			klog.V(5).InfoS("Processing node", "nodeName", val.Name)
@@ -453,10 +467,14 @@ func (s *Scheduler) getPodUsage() (map[string]device.PodUseDeviceStat, error) {
 	return podUsageStat, nil
 }
 
+/**
+ * * my
+ * Extender 的 Bind
+ */
 func (s *Scheduler) Bind(args extenderv1.ExtenderBindingArgs) (*extenderv1.ExtenderBindingResult, error) {
 	klog.InfoS("Attempting to bind pod to node", "pod", args.PodName, "namespace", args.PodNamespace, "node", args.Node)
 	var res *extenderv1.ExtenderBindingResult
-
+	// 创建 binding 对象
 	binding := &corev1.Binding{
 		ObjectMeta: metav1.ObjectMeta{Name: args.PodName, UID: args.PodUID},
 		Target:     corev1.ObjectReference{Kind: "Node", Name: args.Node},
@@ -493,7 +511,7 @@ func (s *Scheduler) Bind(args extenderv1.ExtenderBindingArgs) (*extenderv1.Exten
 		klog.ErrorS(err, "Failed to patch pod annotations", "pod", klog.KObj(current))
 		goto ReleaseNodeLocks
 	}
-
+	// bind，将 Pod 调度到指定节点即可
 	err = s.kubeClient.CoreV1().Pods(args.PodNamespace).Bind(context.Background(), binding, metav1.CreateOptions{})
 	if err != nil {
 		klog.ErrorS(err, "Failed to bind pod", "pod", args.PodName, "namespace", args.PodNamespace, "node", args.Node)
@@ -513,8 +531,13 @@ ReleaseNodeLocks:
 	return &extenderv1.ExtenderBindingResult{Error: err.Error()}, nil
 }
 
+/**
+ * * my
+ * Extender 的 Filter
+ */
 func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFilterResult, error) {
 	klog.InfoS("Starting schedule filter process", "pod", args.Pod.Name, "uuid", args.Pod.UID, "namespace", args.Pod.Namespace)
+	// 从 Pod 信息中解析出 GPU 请求信息
 	resourceReqs := device.Resourcereqs(args.Pod)
 	resourceReqTotal := 0
 	for _, n := range resourceReqs {
@@ -522,6 +545,7 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 			resourceReqTotal += int(k.Nums)
 		}
 	}
+	// 对于没有申请特殊资源的 Pod 直接返回全部 Node 都可以调度，不做处理
 	if resourceReqTotal == 0 {
 		klog.V(1).InfoS("Pod does not request any resources",
 			"pod", args.Pod.Name)
@@ -542,6 +566,7 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 		klog.V(5).InfoS("Nodes failed during usage retrieval",
 			"nodes", failedNodes)
 	}
+	// 过滤 + 打分
 	nodeScores, err := s.calcScore(nodeUsage, resourceReqs, args.Pod, failedNodes)
 	if err != nil {
 		err := fmt.Errorf("calcScore failed %v for pod %v", err, args.Pod.Name)
@@ -557,6 +582,7 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 		}, nil
 	}
 	klog.V(4).Infoln("nodeScores_len=", len((*nodeScores).NodeList))
+	// 选择节点
 	sort.Sort(nodeScores)
 	m := (*nodeScores).NodeList[len((*nodeScores).NodeList)-1]
 	klog.InfoS("Scheduling pod to node",
@@ -564,6 +590,8 @@ func (s *Scheduler) Filter(args extenderv1.ExtenderArgs) (*extenderv1.ExtenderFi
 		"podName", args.Pod.Name,
 		"nodeID", m.NodeID,
 		"devices", m.Devices)
+
+	// 将过滤的满足条件的 GPU 记录到 Pod 的 Annoations 上
 	annotations := make(map[string]string)
 	annotations[util.AssignedNodeAnnotations] = m.NodeID
 	annotations[util.AssignedTimeAnnotations] = strconv.FormatInt(time.Now().Unix(), 10)

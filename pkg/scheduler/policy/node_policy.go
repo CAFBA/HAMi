@@ -46,10 +46,12 @@ func (l NodeScoreList) Swap(i, j int) {
 }
 
 func (l NodeScoreList) Less(i, j int) bool {
+	// Spread 策略使用 > 比较，最终排序结果将是降序
 	if l.Policy == util.NodeSchedulerPolicySpread.String() {
 		return l.NodeList[i].Score > l.NodeList[j].Score
 	}
 	// default policy is Binpack
+	// Binpack 策略使用 < 比较，最终排序结果将是升序
 	return l.NodeList[i].Score < l.NodeList[j].Score
 }
 

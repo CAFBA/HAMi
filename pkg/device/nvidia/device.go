@@ -423,8 +423,13 @@ func resourcePresent(ctr *corev1.Container, name corev1.ResourceName) bool {
 	return false
 }
 
+/**
+ * * my
+ *  Type 使用 strings.Contains 方式，可以指定 Type 的 fullname 或者 shortname 
+ */
 func checkGPUtype(annos map[string]string, cardtype string) bool {
 	cardtype = strings.ToUpper(cardtype)
+	// 当前 Gpu 不匹配 Annoations 中指定的任意一个 Use Type 时说明当前 Gpu 不满足条件，因此返回 false。
 	if inuse, ok := annos[GPUInUse]; ok {
 		useTypes := strings.Split(inuse, ",")
 		if !slices.ContainsFunc(useTypes, func(useType string) bool {
@@ -435,6 +440,7 @@ func checkGPUtype(annos map[string]string, cardtype string) bool {
 	}
 	if unuse, ok := annos[GPUNoUse]; ok {
 		unuseTypes := strings.Split(unuse, ",")
+		// 只要当前 Gpu 匹配上 NoUse 中的任意 Gpu 则说明当前 Gpu 被限制
 		if slices.ContainsFunc(unuseTypes, func(unuseType string) bool {
 			return strings.Contains(cardtype, strings.ToUpper(unuseType))
 		}) {
@@ -467,6 +473,10 @@ func (dev *NvidiaGPUDevices) checkType(annos map[string]string, d device.DeviceU
 	return false, false
 }
 
+/**
+ * * my
+ * UUID 必须完全匹配
+ */
 func (dev *NvidiaGPUDevices) checkUUID(annos map[string]string, d device.DeviceUsage) bool {
 	userUUID, ok := annos[GPUUseUUID]
 	if ok {
@@ -681,6 +691,12 @@ func fitQuota(tmpDevs map[string]device.ContainerDevices, ns string, memreq int6
 	return device.GetLocalCache().FitQuota(ns, mem, core, NvidiaGPUDevice)
 }
 
+/**
+ * * my
+ * 过滤 GPU，如果 Annotations 中有 Type 或 UUID，则再根据进行 Type 或 UUID 过滤
+ * 当一个 Node 上的所有 GPU 都不满足条件时，说明当前 Node 也不满足条件，因此把 Node 也过滤掉
+ * 最终得到满足条件的 Node 以及 Node 上满足条件的 GPU，最后在根据配置的 Binpack、Spread 调度策略选择出目标节点以及 GPU
+ */
 func (nv *NvidiaGPUDevices) Fit(devices []*device.DeviceUsage, request device.ContainerDeviceRequest, pod *corev1.Pod, nodeInfo *device.NodeInfo, allocated *device.PodDevices) (bool, map[string]device.ContainerDevices, string) {
 	k := request
 	originReq := k.Nums
@@ -690,6 +706,7 @@ func (nv *NvidiaGPUDevices) Fit(devices []*device.DeviceUsage, request device.Co
 	tmpDevs = make(map[string]device.ContainerDevices)
 	reason := make(map[string]int)
 	needTopology := util.GetGPUSchedulerPolicyByPod(device.GPUSchedulerPolicy, pod) == util.GPUSchedulerPolicyTopology.String()
+	// 从最后一个开始往前选 GPU
 	for i := len(devices) - 1; i >= 0; i-- {
 		dev := devices[i]
 		klog.V(4).InfoS("scoring pod", "pod", klog.KObj(pod), "device", dev.ID, "Memreq", k.Memreq, "MemPercentagereq", k.MemPercentagereq, "Coresreq", k.Coresreq, "Nums", k.Nums, "device index", i)

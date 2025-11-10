@@ -48,7 +48,11 @@ func NewWebHook() (*admission.Webhook, error) {
 	wh := &admission.Webhook{Handler: &webhook{decoder: decoder}}
 	return wh, nil
 }
-
+/**
+ * * my
+ * 判断 Pod 是否需要使用 HAMi-Scheduler 进行调度
+ * 需要的话就修改 Pod 的 SchedulerName 字段为 hami-scheduler(名字可配置)
+ */
 func (h *webhook) Handle(_ context.Context, req admission.Request) admission.Response {
 	pod := &corev1.Pod{}
 	err := h.decoder.Decode(req, pod)
@@ -70,13 +74,17 @@ func (h *webhook) Handle(_ context.Context, req admission.Request) admission.Res
 	hasResource := false
 	for idx, ctr := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[idx]
+		// 对于特权模式的 Pod，HAMi 直接忽略，因为开启特权模式之后，Pod 可以访问宿主机上的所有设备，再做限制也没意义
 		if ctr.SecurityContext != nil {
 			if ctr.SecurityContext.Privileged != nil && *ctr.SecurityContext.Privileged {
 				klog.Warningf(template+" - Denying admission as container %s is privileged", pod.Namespace, pod.Name, pod.UID, c.Name)
 				continue
 			}
 		}
+		// 如果 Pod Resource 中有申请 HAMi 这边支持的 vGPU 资源，则需要使用 HAMi-Scheduler 进行调度
+		// devices 是一个全局变量， 在 cmd/scheduler/main.go 中通过 InitDevices 初始化
 		for _, val := range device.GetDevices() {
+			// 具体的判断逻辑取决于每个硬件厂商自己的 MutateAdmission 实现
 			found, err := val.MutateAdmission(c, pod)
 			if err != nil {
 				klog.Errorf("validating pod failed:%s", err.Error())
@@ -85,12 +93,14 @@ func (h *webhook) Handle(_ context.Context, req admission.Request) admission.Res
 			hasResource = hasResource || found
 		}
 	}
-
+	// 对于上述满足条件的 Pod，需要由 HAMi-Scheduler 进行调度，Webhook 中会将 Pod 的 spec.schedulerName 改成 hami-scheduler
 	if !hasResource {
 		klog.Infof(template+" - Allowing admission for pod: no resource found", pod.Namespace, pod.Name, pod.UID)
 		//return admission.Allowed("no resource found")
 	} else if len(config.SchedulerName) > 0 {
 		pod.Spec.SchedulerName = config.SchedulerName
+		// 对于使用 vGPU 资源但直接指定 nodeName 的 Pod，Webhook 会直接拒绝，拦截掉 Pod 的创建
+		// 因为指定 nodeName 说明 Pod 不需要调度，会直接到指定节点启动，但是没经过调度，可能该节点并没有足够的资源
 		if pod.Spec.NodeName != "" {
 			klog.Infof(template+" - Pod already has node assigned", pod.Namespace, pod.Name, pod.UID)
 			return admission.Denied("pod has node assigned")

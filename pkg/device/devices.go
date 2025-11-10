@@ -323,6 +323,10 @@ func EncodePodDevices(checklist map[string]string, pd PodDevices) map[string]str
 	return res
 }
 
+/**
+ * * my
+ * 按照预设规则，以冒号，逗号进行切分
+ */
 func DecodeContainerDevices(str string) (ContainerDevices, error) {
 	if len(str) == 0 {
 		return ContainerDevices{}, nil
@@ -449,6 +453,10 @@ func ExtractMigTemplatesFromUUID(uuid string) (int, int, error) {
 	return templateIdx, pos, nil
 }
 
+/**
+ * * my
+ * 通过 NVIDIA 接口的 GenerateResourceRequests 方法获取 GPU 信息
+ */
 func Resourcereqs(pod *corev1.Pod) (counts PodDeviceRequests) {
 	counts = make(PodDeviceRequests, len(pod.Spec.Containers))
 	klog.V(4).InfoS("Processing resource requirements",
@@ -464,6 +472,7 @@ func Resourcereqs(pod *corev1.Pod) (counts PodDeviceRequests) {
 			"containerIndex", i,
 			"containerName", pod.Spec.Containers[i].Name)
 		for idx, val := range devices {
+			// 从 Container 的 Resources 中根据名称解析拿到申请的 gpu、gpucore、gpumem 等信息
 			request := val.GenerateResourceRequests(&pod.Spec.Containers[i])
 			if request.Nums > 0 {
 				cnt += request.Nums
